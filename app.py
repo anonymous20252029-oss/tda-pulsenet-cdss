@@ -144,20 +144,30 @@ with tab1:
         st.pyplot(fig1)
 
     with c2:
-        st.subheader("Interactive 3D Phase-Space")
-        # Plotly Interactive 3D Plot
-        fig2 = go.Figure(data=[go.Scatter3d(
-            x=embedded_cloud[:, 0], 
-            y=embedded_cloud[:, 1], 
-            z=embedded_cloud[:, 2],
-            mode='lines',
-            line=dict(color=embedded_cloud[:, 2], colorscale='Viridis', width=3)
-        )])
-        fig2.update_layout(
-            margin=dict(l=0, r=0, b=0, t=0),
-            scene=dict(xaxis_title="x(t)", yaxis_title="x(t+τ)", zaxis_title="x(t+2τ)")
-        )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.subheader("3D Phase-Space Attractor")
+        
+        # 100% Browser-Compatible Matplotlib 3D Plot
+        fig2 = plt.figure(figsize=(5, 5))
+        ax2 = fig2.add_subplot(111, projection='3d')
+        
+        # Plot the trajectory with a clean, attractive style
+        ax2.plot(embedded_cloud[:, 0], embedded_cloud[:, 1], embedded_cloud[:, 2], 
+                 color='#8e44ad', lw=1.2, alpha=0.8)
+        
+        ax2.set_xlabel("x(t)")
+        ax2.set_ylabel("x(t+τ)")
+        ax2.set_zlabel("x(t+2τ)")
+        
+        # Remove gray background panes for a modern, clean look
+        ax2.xaxis.pane.fill = False
+        ax2.yaxis.pane.fill = False
+        ax2.zaxis.pane.fill = False
+        ax2.grid(True, linestyle=":", alpha=0.6)
+        
+        # Adjust viewing angle for best 3D perspective
+        ax2.view_init(elev=20, azim=45)
+        
+        st.pyplot(fig2)
 
 with tab2:
     st.subheader("Extracted Topological Invariants (Model Features)")
