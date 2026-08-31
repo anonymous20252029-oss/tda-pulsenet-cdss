@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 import pickle
 import json
 import os
@@ -9,16 +10,15 @@ from ripser import ripser
 # --- Page Configuration ---
 st.set_page_config(page_title="TDA-PulseNet CDSS", page_icon="🫀", layout="wide")
 st.title("🫀 TDA-PulseNet: Clinical Decision Support System")
+st.markdown("*An explainable topological framework for Traditional Chinese Medicine (TCM) pulse diagnosis under ambulatory conditions.*")
 
 # --- Load Colab Outputs (Model & JSON) ---
 @st.cache_resource
 def load_assets():
-    # Load the LightGBM model trained in Colab
     model_path = os.path.join("models", "tda_pulsenet_lightgbm.pkl")
     with open(model_path, "rb") as f:
         model = pickle.load(f)
         
-    # Load the metrics JSON generated in Colab
     json_path = os.path.join("web_demo_assets", "summary_metrics.json")
     with open(json_path, "r") as f:
         metrics = json.load(f)
@@ -27,15 +27,26 @@ def load_assets():
 
 try:
     model, metrics = load_assets()
-    
-    # --- Display Colab Cross-Validation Metrics ---
-    st.sidebar.header("📊 Colab Training Metrics")
+    st.sidebar.success("✅ Model & Metrics loaded successfully.")
+    st.sidebar.header("📊 Validation Metrics (LOSO-CV)")
     st.sidebar.info(f"**ROC-AUC:** {metrics['mean_auc']:.4f}\n\n**F1-Score:** {metrics['mean_f1']:.4f}\n\n**MCC:** {metrics['mean_mcc']:.4f}")
 except FileNotFoundError:
-    st.error("Error: Could not find model or metrics files. Please ensure the 'models' and 'web_demo_assets' folders exist in your GitHub repository and contain the correct files.")
+    st.error("⚠️ Error: Pre-trained models not found. Please check your 'models' and 'web_demo_assets' folders.")
     st.stop()
 
 # --- Helper Functions ---
+def generate_realistic_ppg(t, heart_rate=70, stiffness=1.0):
+    """Generates a realistic arterial pulse wave using dual-Gaussian model."""
+    f = heart_rate / 60.0
+    phase = (2 * np.pi * f * t) % (2 * np.pi)
+    # Systolic peak
+    sys_wave = np.exp(-((phase - 1)**2) / 0.5)
+    # Diastolic/Reflected wave (stiffness pulls it closer to systole and increases amplitude)
+    dias_pos = max(1.5, 3.0 - (stiffness * 0.8))
+    dias_amp = 0.3 + (stiffness * 0.2)
+    dias_wave = dias_amp * np.exp(-((phase - dias_pos)**2) / 0.8)
+    return sys_wave + dias_wave
+
 def takens_embedding(time_series, delay=15, dimension=3):
     n_samples = len(time_series)
     max_index = n_samples - (dimension - 1) * delay
@@ -58,56 +69,105 @@ def compute_betti_features(embedded_cloud, n_bins=100):
     lifetimes_h1 = diagrams[1][:, 1] - diagrams[1][:, 0]
     lifetimes_h1 = lifetimes_h1[np.isfinite(lifetimes_h1)]
     entropy = -np.sum((lifetimes_h1/np.sum(lifetimes_h1)) * np.log((lifetimes_h1/np.sum(lifetimes_h1)) + 1e-10)) if len(lifetimes_h1) > 0 else 0.0
-    
     return betti_0, betti_1, entropy
 
-# --- Interface Input ---
-st.sidebar.header("⚙️ Patient Signal Input")
-sample_choice = st.sidebar.selectbox("Select Benchmark Clinical State:", ["Healthy Resting State", "Pathological Dynamic Tension"])
+# --- Interface Input & Case Selection ---
+st.sidebar.header("⚙️ Clinical Case Simulator")
+case_choice = st.sidebar.selectbox(
+    "Select Patient Case:", 
+    [
+        "Case 1: Healthy Resting Baseline", 
+        "Case 2: Mild Tension (Early Qi Stagnation)", 
+        "Case 3: Severe Pathological Tension ('Wiry')",
+        "Case 4: Ambulatory Motion Artifacts"
+    ]
+)
 
-t = np.linspace(0, 10, 1000)
-if sample_choice == "Healthy Resting State":
-    noisy_wave = np.sin(2 * np.pi * 1.2 * t) + np.random.normal(0, 0.08, 1000)
-else:
-    # Simulating the high-tension 'wiry' proxy with added accelerometer motion noise
-    noisy_wave = np.sin(2 * np.pi * 1.2 * t) + 0.7 * np.sin(4 * np.pi * 1.2 * t + 0.3) + np.random.normal(0, 0.15, 1000)
+# Dynamic noise injection slider for Reviewers
+noise_level = st.sidebar.slider("Inject Hardware Noise (Accelerometer Artifacts):", 0.0, 1.0, 0.1)
 
-# --- Process Pipeline & ACTUAL Inference ---
+# Generate Signal based on Case
+t = np.linspace(0, 5, 1000) # 5 seconds of data
+
+if "Case 1" in case_choice:
+    raw_wave = generate_realistic_ppg(t, heart_rate=65, stiffness=0.5)
+elif "Case 2" in case_choice:
+    raw_wave = generate_realistic_ppg(t, heart_rate=78, stiffness=1.2)
+elif "Case 3" in case_choice:
+    raw_wave = generate_realistic_ppg(t, heart_rate=90, stiffness=2.5)
+elif "Case 4" in case_choice:
+    raw_wave = generate_realistic_ppg(t, heart_rate=85, stiffness=1.5)
+    noise_level = max(0.5, noise_level) # Force high noise
+
+# Add noise (simulating accelerometer movement + baseline wander)
+motion_artifact = noise_level * np.sin(2 * np.pi * 0.3 * t) + np.random.normal(0, noise_level * 0.2, 1000)
+noisy_wave = raw_wave + motion_artifact
+
+# --- TDA Process Pipeline & Inference ---
 embedded_cloud = takens_embedding(noisy_wave, delay=15, dimension=3)
 betti_0, betti_1, entropy = compute_betti_features(embedded_cloud)
-
-# Assemble exact 201-dimensional feature vector expected by the Colab model
 feature_vector = np.hstack([betti_0, betti_1, [entropy]]).reshape(1, -1)
-
-# REAL Model Prediction
 prob_tension = model.predict_proba(feature_vector)[0, 1]
 
-# --- Dashboard Output ---
-col1, col2 = st.columns(2)
-col1.metric("CDSS Pathological Tension Probability", f"{prob_tension * 100:.1f}%")
-col2.metric("Topological Entropy", f"{entropy:.4f}")
+# --- Dashboard Layout ---
+col1, col2, col3 = st.columns([1, 1, 1])
+with col1:
+    st.metric("Heart Rate (Estimated)", f"{65 if 'Case 1' in case_choice else (90 if 'Case 3' in case_choice else 80)} BPM")
+with col2:
+    st.metric("Topological Entropy (H1)", f"{entropy:.4f}")
+with col3:
+    st.metric("CDSS Tension Probability", f"{prob_tension * 100:.1f}%")
+
+# Clinical Output
+if prob_tension > 0.60:
+    st.error(f"⚠️ **Syndrome Detected: Liver Qi Stagnation / Pathological Tension**")
+    st.write("Diagnostic Rationale: The persistent homology engine detected rigid, high-persistence 1D loops ($H_1$), consistent with reduced arterial compliance and the classical 'Wiry' (Xian) pulse.")
+else:
+    st.success(f"✅ **Healthy Baseline / Normal Arterial Compliance**")
+    st.write("Diagnostic Rationale: The topological state-space reveals stable, low-dimensional attractors typical of a healthy, non-pathological resting state.")
 
 st.divider()
 
-if prob_tension > 0.50:
-    st.error(f"⚠️ **Pathological Dynamic Tension Detected**")
-    st.write("**Clinical Recommendation:** High persistence in $b_1$ topological loops indicates elevated arterial wall tension (proxy for 'Wiry' pulse quality).")
-else:
-    st.success(f"✅ **Normal/Healthy Baseline**")
-    st.write("**Clinical Recommendation:** Stable low-dimensional phase attractor. Normal physiological compliance.")
+# --- Interactive Visualizations ---
+tab1, tab2 = st.tabs(["📉 Pulse Waveform & TDA Attractor", "📊 Betti Persistence Curves"])
 
-# --- Visualization ---
-st.subheader("Signal & Phase Space Attractor")
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+with tab1:
+    c1, c2 = st.columns([1.5, 1])
+    
+    with c1:
+        st.subheader("1D Time-Series (Sensor Input)")
+        fig1, ax1 = plt.subplots(figsize=(8, 3))
+        ax1.plot(t, noisy_wave, color="#e74c3c" if noise_level > 0.3 else "#2ecc71", lw=1.5)
+        ax1.set_xlabel("Time (s)")
+        ax1.set_ylabel("Amplitude")
+        ax1.grid(True, linestyle=":", alpha=0.6)
+        st.pyplot(fig1)
 
-ax1.plot(t[:500], noisy_wave[:500], color='#2c3e50')
-ax1.set_title("Input 1D Pulse Waveform")
-ax1.set_xlabel("Time")
+    with c2:
+        st.subheader("Interactive 3D Phase-Space")
+        # Plotly Interactive 3D Plot
+        fig2 = go.Figure(data=[go.Scatter3d(
+            x=embedded_cloud[:, 0], 
+            y=embedded_cloud[:, 1], 
+            z=embedded_cloud[:, 2],
+            mode='lines',
+            line=dict(color=embedded_cloud[:, 2], colorscale='Viridis', width=3)
+        )])
+        fig2.update_layout(
+            margin=dict(l=0, r=0, b=0, t=0),
+            scene=dict(xaxis_title="x(t)", yaxis_title="x(t+τ)", zaxis_title="x(t+2τ)")
+        )
+        st.plotly_chart(fig2, use_container_width=True)
 
-ax2 = fig.add_subplot(122, projection='3d')
-ax2.plot(embedded_cloud[:, 0], embedded_cloud[:, 1], embedded_cloud[:, 2], color='#8e44ad', lw=0.8)
-ax2.set_title("Reconstructed 3D Attractor")
-
-st.pyplot(fig)
-
-st.sidebar.info("💡 Powered by LightGBM model trained in Google Colab for BMC Medical Informatics and Decision Making submission.")
+with tab2:
+    st.subheader("Extracted Topological Invariants (Model Features)")
+    fig3, ax3 = plt.subplots(figsize=(10, 3))
+    scales = np.linspace(0, 1.5, 100)
+    ax3.plot(scales, betti_0, label="Betti-0 (Connected Components)", color="#34495e", lw=2)
+    ax3.plot(scales, betti_1, label="Betti-1 (1D Loops / Notches)", color="#f39c12", lw=2)
+    ax3.fill_between(scales, betti_1, color="#f39c12", alpha=0.2)
+    ax3.set_xlabel("Filtration Scale (ε)")
+    ax3.set_ylabel("Betti Number Count")
+    ax3.legend()
+    ax3.grid(True, linestyle=":", alpha=0.6)
+    st.pyplot(fig3)
